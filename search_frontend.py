@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 
-
 from flask import Flask, request, jsonify
-from search_backend import search_title_backend, search_body_backend, final_search, search_anchor_backend
+from search_backend import final_search
 
 
 
@@ -69,7 +68,7 @@ def search_body():
     query = request.args.get('query', '')
     if len(query) == 0:
         return jsonify(res)
-    res = search_body_backend(query)
+    #########################
     return jsonify(res)
 
 
@@ -101,7 +100,7 @@ def search_title():
     query = request.args.get('query', '')
     if len(query) == 0:
         return jsonify(res)
-    res = search_title_backend(query)
+    ####################333
     return jsonify(res)
 
 
@@ -133,7 +132,7 @@ def search_anchor():
     query = request.args.get('query', '')
     if len(query) == 0:
         return jsonify(res)
-    res = search_anchor_backend(query)
+    #######
     return jsonify(res)
 
 if __name__ == '__main__':

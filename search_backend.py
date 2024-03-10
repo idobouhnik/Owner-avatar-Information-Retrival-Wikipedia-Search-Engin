@@ -7,48 +7,13 @@ Original file is located at
     https://colab.research.google.com/drive/1iB5r9UKBQsbTvV9PRrp9fbFRpqXWCIuN
 """
 
-!pip install -q pyspark
-!pip install -U -q PyDrive
-!apt install openjdk-8-jdk-headless -qq
-!pip install -q graphframes
-import os
-os.environ["JAVA_HOME"] = "/usr/lib/jvm/java-8-openjdk-amd64"
-graphframes_jar = 'https://repos.spark-packages.org/graphframes/graphframes/0.8.2-spark3.2-s_2.12/graphframes-0.8.2-spark3.2-s_2.12.jar'
-spark_jars = '/usr/local/lib/python3.7/dist-packages/pyspark/jars'
-!wget -N -P $spark_jars $graphframes_jar
-
-import pyspark
-from pyspark.sql import *
-from pyspark.sql.functions import *
-from pyspark import SparkContext, SparkConf
-from pyspark.sql import SQLContext
-from pyspark.ml.feature import Tokenizer, RegexTokenizer
-from graphframes import *
-from pyspark.sql import SparkSession
-
-from pyspark.sql import SparkSession
-from pyspark import SparkConf
-from pathlib import Path
-
-# Set the path to the gcs-connector JAR file
-gcs_connector_jar = "path/to/gcs-connector-hadoop3-2.2.2.jar"
-
-# Initializing Spark context
-# Create a Spark context and session
-conf = SparkConf().set("spark.ui.port", "4050")
-conf.set("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem")
-conf.set("spark.hadoop.fs.AbstractFileSystem.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS")
-conf.set("spark.jars", gcs_connector_jar)  # Add the gcs-connector JAR to the Spark configuration
-sc = pyspark.SparkContext(conf=conf)
-sc.addPyFile(str(Path(spark_jars) / Path(graphframes_jar).name))
-spark = SparkSession.builder.getOrCreate()
-
 #imports
 import re
 import numpy as np
 import pickle
 import nltk
 import builtins
+
 from nltk.corpus import stopwords
 import json
 from contextlib import closing
@@ -79,8 +44,12 @@ import builtins
 import math
 from nltk import ngrams
 
-
+from google.cloud import storage
+client = storage.Client()
 stemmer = PorterStemmer()
+
+import os
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = 'task3mapreduce315537936-2e5ecd407dc5.json'
 
 import hashlib
 def _hash(s):
@@ -89,149 +58,63 @@ def _hash(s):
 nltk.download('stopwords')
 
 
+class GCPHandler:
+    def __init__(self, bucket_name):
+        self.bucket_name = bucket_name
+        self.client = storage.Client()
 
-bucket = '315537936'
-full_path = f"gs://{bucket}/"
-client = storage.Client()
-#bucket = client.get_bucket("315537936")
+    def download_from_gcp(self, src_file_name, dest_file_name=None, folder=False):
+        bucket = self.get_client()
+        src_file_name = self.reformat_path(src_file_name, self.bucket_name)
+        if folder:
+            blobs = bucket.list_blobs()
+            path = os.path.join(self.path_to_dataset_files_dir, "test_set")
+            os.mkdir(path)
+            for blob in blobs:
+                file_name = blob.name
+                if file_name.find(src_file_name) != -1 and not file_name.endswith(src_file_name + "/"):
+                    dir = os.path.dirname(file_name)
+                    full_dir = os.path.join(path, dir[len(src_file_name) + 1:])
+                    if not os.path.exists(full_dir):
+                        os.makedirs(full_dir)
+                    dest = os.path.join(path , file_name[len(src_file_name) + 1:])
+                    blob.download_to_filename(dest)
+            return
+        blob = bucket.blob(src_file_name)
+        if dest_file_name:
+            blob.download_to_filename(dest_file_name)
+        else:
+            blob.download_to_filename(src_file_name)
 
-# Authenticate your user
-# The authentication should be done with the email connected to your GCP account
-from google.colab import auth
-import signal
+    def get_client(self):
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(self.bucket_name)
+        return bucket
 
-AUTH_TIMEOUT = 30000000 #It worked well on 30000 , all printings have done with this time
+    @staticmethod
+    def reformat_path(path, bucket_name):
+        start_index = path.find(bucket_name)
+        if start_index == -1:
+            return path
+        return path[start_index + len(bucket_name) + 1:]
 
-def handler(signum, frame):
-  raise Exception("Authentication timeout!")
+    def get_blob(self, blob_path):
+        return self.get_client().blob(blob_path)
 
-signal.signal(signal.SIGALRM, handler)
-signal.alarm(AUTH_TIMEOUT)
+bucket_name = '315537936'  # Replace with your actual bucket name
+gcp_handler = GCPHandler(bucket_name)
 
-try:
-   auth.authenticate_user()
-except:
-   pass
+############################ loading indexes and dictionaries from bucket ############################
+title_stem = pickle.loads(gcp_handler.get_blob('title_stem_only/title_stem_only_index.pkl').download_as_string())
+body_stem = pickle.loads(gcp_handler.get_blob('text_stem/text_stem_index.pkl').download_as_string())
+title_gram = pickle.loads(gcp_handler.get_blob('title2gram/title2gram_index.pkl').download_as_string())
+pageviews = pickle.loads(gcp_handler.get_blob('pageviews.pkl').download_as_string())
+pagerank = pickle.loads(gcp_handler.get_blob('pagerank.pkl').download_as_string())
+idtitle = pickle.loads(gcp_handler.get_blob('doc_title_dict.pkl').download_as_string())
 
-from google.cloud import storage
-import os
-from google.colab import files
 
-# Upload the JSON key file to Colab
-uploaded = files.upload()
+############################ end loading indexes and dictionaries from bucket ############################
 
-# Set the GCS credentials using the uploaded key file
-key_file_name = 'task3mapreduce315537936-2e5ecd407dc5.json'
-os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = key_file_name
-
-# # if nothing prints here you forgot to upload the file inverted_index_gcp.py to the home dir
-# %cd -q /home/dataproc
-# !ls inverted_index_gcp.py
-# # adding our python module to the cluster
-# sc.addFile("/home/dataproc/inverted_index_gcp.py")
-# sys.path.insert(0,SparkFiles.getRootDirectory())
-# from inverted_index_gcp import InvertedIndex
-
-# bucket_name = '315537936'
-# full_path = f"gs://{bucket_name}/"
-# paths=[]
-
-# client = storage.Client()
-# blobs = client.list_blobs(bucket_name)
-# for b in blobs:
-#     if b.name != 'graphframes.sh':
-#         paths.append(full_path+b.name)
-# corpus  = spark.read.parquet(*paths)
-
-# #spark
-# # These will already be installed in the testing environment so disregard the
-# # amount of time (~1 minute) it takes to install.
-# !pip install -q pyspark
-# !pip install -U -q PyDrive
-# !apt install openjdk-8-jdk-headless -qq
-# !pip install -q graphframes
-# import os
-# os.environ["JAVA_HOME"] = "/usr/lib/jvm/java-8-openjdk-amd64"
-# graphframes_jar = 'https://repos.spark-packages.org/graphframes/graphframes/0.8.2-spark3.2-s_2.12/graphframes-0.8.2-spark3.2-s_2.12.jar'
-# spark_jars = '/usr/local/lib/python3.7/dist-packages/pyspark/jars'
-# !wget -N -P $spark_jars $graphframes_jar
-
-# nltk.download('stopwords')
-
-# # %cd -q /home/dataproc
-# # !ls inverted_index_gcp.py
-# from inverted_index_gcp import InvertedIndex, MultiFileReader
-
-# import math
-# from google.cloud import storage
-# bucket_name = '315537936'
-# full_path = f"gs://{bucket_name}/"
-# client = storage.Client()
-# bucket = client.get_bucket("315537936")
-
-# Uploading Indexes Without Stemming
-
-client = storage.Client()
-
-client = storage.Client.from_service_account_json('task3mapreduce315537936-2e5ecd407dc5.json')
-
-bucket = client.get_bucket('315537936')
-
-title_index = pickle.loads(bucket.get_blob('title/title_index.pkl').download_as_string())
-
-#body_index = pickle.loads(bucket.get_blob('text/text_index.pkl').download_as_string())
-
-# Uploading Indexes with Stemming Only
-
-client = storage.Client()
-
-client = storage.Client.from_service_account_json('task3mapreduce315537936-2e5ecd407dc5.json')
-
-bucket = client.get_bucket('315537936')
-
-title_stem = pickle.loads(bucket.get_blob('title_stem_only/title_stem_only_index.pkl').download_as_string())
-
-body_stem = pickle.loads(bucket.get_blob('text_stem/text_stem_index.pkl').download_as_string())
-
-# Uploading Indexes with N-gram Only
-
-client = storage.Client()
-
-client = storage.Client.from_service_account_json('task3mapreduce315537936-2e5ecd407dc5.json')
-
-bucket = client.get_bucket('315537936')
-
-title_gram = pickle.loads(bucket.get_blob('title2gram/title2gram_index.pkl').download_as_string())
-
-#body_gram = pickle.loads(bucket.get_blob('text_2gram/text_2gram_index.pkl').download_as_string())
-
-# Uploading Indexes with N-gram and stemming
-
-client = storage.Client()
-
-client = storage.Client.from_service_account_json('task3mapreduce315537936-2e5ecd407dc5.json')
-
-bucket = client.get_bucket('315537936')
-
-title_total = pickle.loads(bucket.get_blob('title_stem/title_stem_index.pkl').download_as_string())
-
-body_total = pickle.loads(bucket.get_blob('text_stem2gram/text_stem2gram_index.pkl').download_as_string())
-
-#Uploading useful dictionary pickle files
-
-client = storage.Client()
-
-client = storage.Client.from_service_account_json('task3mapreduce315537936-2e5ecd407dc5.json')
-
-bucket = client.get_bucket('315537936')
-
-#anchor_index = pickle.loads(bucket.get_blob('anchor/anchor_index.pkl').download_as_string())
-
-pageviews = pickle.loads(bucket.get_blob('pageviews.pkl').download_as_string())
-
-pagerank = pickle.loads(bucket.get_blob('pagerank.pkl').download_as_string())
-
-idtitle = pickle.loads(bucket.get_blob('doc_title_dict.pkl').download_as_string())
 
 TUPLE_SIZE = 6
 stemmer = PorterStemmer()
@@ -263,6 +146,7 @@ def get_query_tokens(text, stemming=False):
     else:
         tokens = [term for term in tokens if term not in all_stopwords]
     return tokens
+
 
 def get_tokens_ngrams(text,stemming=False):
     """
@@ -324,6 +208,7 @@ def get_candidate_documents(query, index):
             candidates.update(only_docs)
     return candidates, candidates_docs
 
+
 def get_top_n_scored_docs(score_dict, N=500):
     """
     Sorts the best documents by their scores.
@@ -338,6 +223,7 @@ def get_top_n_scored_docs(score_dict, N=500):
     return sorted([(doc_id, score) for doc_id, score in score_dict.items()], key=lambda x: x[1], reverse=True)[:N]
 
 ###################################################################################################################
+
 
 ###################  Search title and / or anchor index ################################################
 
@@ -366,6 +252,7 @@ def get_title_anchor_score(query, term_dict):
             dict_to_return[doc] = dict_to_return.get(doc, 0) + 1
     return dict_to_return
 
+
 def search_for_title_anchor(query, index):
     """
     Returns the best documents for title and anchor.
@@ -385,6 +272,7 @@ def search_for_title_anchor(query, index):
     id_score = get_top_n_scored_docs(rr, N=100000000)
     res = [i[0] for i in id_score]
     return [(j, idtitle[j]) for j in res if j in idtitle], rr
+
 
 ########################  Search body index   ######################################################
 
@@ -426,6 +314,7 @@ def cos_sim_calculation(query_tokens, index, docs, candidates_dict):
 
     return doc_score
 
+
 def search_body(index, query):
     """
     Returns the best documents for body.
@@ -441,6 +330,8 @@ def search_body(index, query):
     top_n = get_top_n_scored_docs(cos_sim_dict, 100)
     res = [i[0] for i in top_n]
     return [(j, idtitle[j]) for j in res], cos_sim_dict
+
+
 
 ########################  Class for improving body index search #########################################
 
@@ -502,6 +393,7 @@ class BM25_index:
 
 #######################################################################################################
 
+
 ################################# Helper for main search ############################################
 def find_minmax(scores_list):
     """
@@ -519,6 +411,7 @@ def find_minmax(scores_list):
     return min_v, max_v
 
   #######################################################################################################
+
 
 #####################      THE MAIN SEARCH   ##################################################\
 
@@ -631,123 +524,10 @@ def search(query, idx_title, idx_body, idx_title_ngram):
 
     return res
 
+
 def final_search(query):
     """
     Calls to the final search.
     """
     return search(query, title_stem, body_stem, title_gram)
 
-import json
-import time
-from sklearn.model_selection import KFold
-from sklearn.metrics import accuracy_score, precision_score, recall_score
-
-with open('queries_train.json', 'rt') as f:
-  queries = json.load(f)
-
-def average_precision(true_list, predicted_list, k=40):
-    true_set = frozenset(true_list)
-    predicted_list = predicted_list[:k]
-    precisions = []
-    for i,doc_id in enumerate(predicted_list):
-        if doc_id in true_set:
-            prec = (len(precisions)+1) / (i+1)
-            precisions.append(prec)
-    if len(precisions) == 0:
-        return 0.0
-    return round(sum(precisions)/len(precisions),3)
-
-def precision_at_k(true_list, predicted_list, k):
-    true_set = frozenset(true_list)
-    predicted_list = predicted_list[:k]
-    if len(predicted_list) == 0:
-        return 0.0
-    return round(len([1 for doc_id in predicted_list if doc_id in true_set]) / len(predicted_list), 3)
-def recall_at_k(true_list, predicted_list, k):
-    true_set = frozenset(true_list)
-    predicted_list = predicted_list[:k]
-    if len(true_set) < 1:
-        return 1.0
-    return round(len([1 for doc_id in predicted_list if doc_id in true_set]) / len(true_set), 3)
-def f1_at_k(true_list, predicted_list, k):
-    p = precision_at_k(true_list, predicted_list, k)
-    r = recall_at_k(true_list, predicted_list, k)
-    if p == 0.0 or r == 0.0:
-        return 0.0
-    return round(2.0 / (1.0/p + 1.0/r), 3)
-def results_quality(true_list, predicted_list):
-    p5 = precision_at_k(true_list, predicted_list, 5)
-    f1_30 = f1_at_k(true_list, predicted_list, 30)
-    if p5 == 0.0 or f1_30 == 0.0:
-        return 0.0
-    return round(2.0 / (1.0/p5 + 1.0/f1_30), 3)
-
-import time
-
-results_dict = {}
-precision_values=[]
-recall_values = []
-f1_values= []
-quality_values = []
-avg_precision_values = []
-t_start = time.time()
-
-for query_id, query_text in queries.items():
-    # Assuming final_search returns a list of tuples (doc_id, title)
-    predicted_results = final_search(query_id)
-
-    # Extract doc_id values from predicted_results
-    predicted_doc_ids = [doc_id for doc_id, title in predicted_results]
-
-    # Calculate metrics
-    precision = precision_at_k(query_text, predicted_doc_ids, 10)
-    recall = recall_at_k(query_text, predicted_doc_ids, 10)
-    f1 = f1_at_k(query_text, predicted_doc_ids, 10)
-    quality = results_quality(query_text, predicted_doc_ids)
-    avg_precision = average_precision(query_text, predicted_doc_ids, 40)
-
-    # Store results in a dictionary
-    query_results = {
-        "precision_at_k": precision,
-        "recall_at_k": recall,
-        "f1_at_k": f1,
-        "results_quality": quality,
-        "average_precision": avg_precision
-    }
-
-    # Add to the main results dictionary
-    results_dict[query_id] = query_results
-
-# Print results for each query
-for query_id, query_results in results_dict.items():
-    print(f"Results for Query {query_id}:")
-    print(f"Precision@10: {query_results['precision_at_k']}")
-    print(f"Recall@10: {query_results['recall_at_k']}")
-    print(f"F1@10: {query_results['f1_at_k']}")
-    print(f"Results Quality: {query_results['results_quality']}")
-    print(f"MAP@40: {query_results['average_precision']}")
-    print("\n")
-
-    # Append metric values for averaging
-    precision_values.append(query_results['precision_at_k'])
-    recall_values.append(query_results['recall_at_k'])
-    f1_values.append(query_results['f1_at_k'])
-    quality_values.append(query_results['results_quality'])
-    avg_precision_values.append(query_results['average_precision'])
-
-# Calculate and print averages
-average_precision_at_k = round(sum(precision_values) / len(precision_values),3)
-average_recall_at_k = round(sum(recall_values) / len(recall_values),3)
-average_f1_at_k = round(sum(f1_values) / len(f1_values),3)
-average_quality = round(sum(quality_values) / len(quality_values),3)
-average_avg_precision = round(sum(avg_precision_values) / len(avg_precision_values),3)
-
-print("\nAverages across all queries:")
-print(f"Average Precision@10: {average_precision_at_k}")
-print(f"Average Recall@10: {average_recall_at_k}")
-print(f"Average F1@10: {average_f1_at_k}")
-print(f"Average Results Quality: {average_quality}")
-print(f"Average MAP@40: {average_avg_precision}")
-
-average_retrieval_time = time.time() - t_start
-print(f"Avergae Retreival Time for {len(queries.keys())} Queries = {average_retrieval_time}")
